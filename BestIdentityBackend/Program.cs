@@ -11,6 +11,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
 
 namespace BestIdentityBackend
 {
@@ -24,7 +25,7 @@ namespace BestIdentityBackend
             listener.Prefixes.Add("http://*/");
             listener.Start();
 
-            Console.WriteLine($"Identity Server started: {listener.Prefixes.First()}");
+            Console.WriteLine($"Server started: {listener.Prefixes.First()}");
 
             for (; ; )
             {
@@ -32,31 +33,31 @@ namespace BestIdentityBackend
 
                 ThreadPool.QueueUserWorkItem((state) =>
                 {
+                    #region LoadData
                     var request = ((HttpListenerContext)state).Request;
                     var response = ((HttpListenerContext)state).Response;
                     string raw_url = Uri.UnescapeDataString(request.RawUrl);
                     string identity = GetBytesHash(Encoding.UTF8.GetBytes($"{request.UserAgent}~{request.UserHostAddress}~{request.UserHostName}~{request.UserLanguages}"));
-                    string os_name = GetOperatingSystem(request.UserAgent);
-                    string browsser_name = GetBrowserName(request.UserAgent);
 
                     Console.WriteLine($"{identity} {raw_url}");
 
                     if (!users_data.ContainsKey(identity))
                     {
-                        users_data.Add(identity, new UsersData(request.UserHostAddress.ToString(), request.UserLanguages.First(), browsser_name, Permision.USER, os_name));
+                        users_data.Add(identity, new UsersData(request.UserHostAddress.ToString(), request.UserLanguages.First(), GetBrowserName(request.UserAgent), Permision.USER, GetOperatingSystem(request.UserAgent)));
                         users_data[identity].debug.Add($"[NEW IDENTITY] ({users_data[identity].last_request}) {identity} {Permision.GetString(users_data[identity].permision)}");
                         response.Redirect(raw_url);
                         response.Close();
                         return;
                     }
+                    #endregion
 
                     if (raw_url == "/debug")
                     {
                         UsersData data = users_data[identity];
                         data.last_time = DateTime.Now;
-                        users_data[identity].debug.Add($"[SHOW DEBUG] ({data.last_request}) {identity} {Permision.GetString(data.permision)}");
+                        users_data[identity].debug.Add($"[SHOW DEBUG] ({data.last_time}) {identity} {Permision.GetString(data.permision)}");
 
-                        string html = File.ReadAllText(Path.Combine(current, "public", "show_users.html"));
+                        string html = File.ReadAllText(Path.Combine(current, "data", "show_users.html"));
 
                         List<KeyValuePair<string, UsersData>> ShortedData = users_data.OrderByDescending(user => user.Value.last_time).ToList();
 
@@ -78,24 +79,45 @@ namespace BestIdentityBackend
                 </details>";
                         }
 
-                        html = html.Replace("<!--users-->", sb);
+                        html = html.Replace("<!--debug-->", sb);
                         byte[] buffer = Encoding.UTF8.GetBytes(html);
                         response.OutputStream.Write(buffer, 0, buffer.Length);
                         response.Close();
                         return;
                     }
 
+                    if(File.Exists(Path.Combine(current, "data", "public", raw_url.Remove(0, 1))))
+                    {
+                        byte[] buffer = File.ReadAllBytes(Path.Combine(current, "data", "public", raw_url.Remove(0, 1)));
+                        response.OutputStream.Write(buffer, 0, buffer.Length);
+                        response.Close();
+                        return;
+                    }
+
+                    #region MainRequest
                     {
                         UsersData data = users_data[identity];
                         data.last_time = DateTime.Now;
                         data.debug.Add($"[NEXT REQUEST] ({data.last_time}) {identity} {raw_url} {request.HttpMethod}");
 
-                        string html = $"{raw_url}, {identity}";
-                        byte[] buffer = Encoding.UTF8.GetBytes(html);
-                        response.OutputStream.Write(buffer, 0, buffer.Length);
+                        {
+                            string path = Path.Combine(current, "data", "public", "index.html");
+                            if (raw_url == "/" && File.Exists(path))
+                            {
+                                string html = File.ReadAllText(path);
+                                byte[] buffer = Encoding.UTF8.GetBytes(html);
+                                response.OutputStream.Write(buffer, 0, buffer.Length);
+                                response.Close();
+                                return;
+                            }
+                        }
+                       
+                        
+
+                        response.Redirect("/");
                         response.Close();
                     }
-
+                    #endregion
                 }, context);
             }
         }
@@ -135,38 +157,20 @@ namespace BestIdentityBackend
         }
         static string GetOperatingSystem(string userAgent)
         {
-            // Use regular expressions to extract operating system information from User-Agent string
             Regex osRegex = new Regex(@"\((.*?)\)");
             Match osMatch = osRegex.Match(userAgent);
 
             if (osMatch.Success)
-            {
-                // The first group captures the content inside the parentheses, which often includes OS information
-                string osInfo = osMatch.Groups[1].Value;
-
-                // You may want to further parse or clean up the extracted information based on your needs
-                return osInfo;
-            }
-
-            // Return a default value or handle the case where OS information is not found
+                return osMatch.Groups[1].Value;
             return "Unknown";
         }
         static string GetBrowserName(string userAgent)
         {
-            // Use regular expressions to extract browser information from User-Agent string
             Regex browserRegex = new Regex(@"(?:MSIE|Trident.*?rv:|Edge/|Chrome/|Firefox/|Safari/)(.*?)(?:\s|$)");
             Match browserMatch = browserRegex.Match(userAgent);
 
             if (browserMatch.Success)
-            {
-                // The first group captures the content inside the parentheses, which often includes browser information
-                string browserInfo = browserMatch.Groups[1].Value;
-
-                // You may want to further parse or clean up the extracted information based on your needs
-                return browserInfo;
-            }
-
-            // Return a default value or handle the case where browser information is not found
+                return browserMatch.Groups[1].Value;
             return "Unknown";
         }
     }
@@ -181,11 +185,14 @@ namespace BestIdentityBackend
         public int permision = 0;
         public List<string> debug { get; set; }
         public List<object> items { get; set; }
+        public List<Type> items_types { get; set; }
 
         public UsersData(string public_ip, string language, string browser_name, int permision = 3, string system_name = "Unknown")
         {
             debug = new List<string>();
             items = new List<object>();
+            items_types = new List<Type>();
+
             this.system_name = system_name;
             this.public_ip = IPAddress.TryParse(public_ip, out IPAddress adress) ? adress : null;
             this.language = language;
